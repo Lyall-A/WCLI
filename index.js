@@ -1,15 +1,29 @@
 const prompts = require("prompts");
 const http = require("http");
 const info = { };
+const { writeFileSync, readFileSync } = require("fs");
+let lastInstance;
+try {
+    lastInstance = readFileSync("./lastinstance", "utf-8");
+} catch (err) { }
 
 (async function main() {
+    // Prompt user for WLED instance IP
     info.instance = await prompts({
         name: "instance",
         type: "text",
         message: "Enter IP of WLED instance",
+        initial: lastInstance,
         validate: i => i ? true : "You must enter the IP of your WLED instance"
     }).then(i => i.instance || process.exit(0));
+    
+    // Check if IP is valid
+    if (!verifyIp(info.instance)) {
+        console.log("IP is not valid!");
+        return main();
+    }
 
+    // Prompt user if WLED info should contain advanced info
     info.advanced = await prompts({
         name: "advanced",
         type: "select",
@@ -17,18 +31,23 @@ const info = { };
         choices: [{ title: "Yes", value: true }, { title: "No", value: false }]
     }).then(i => i.advanced);
 
-    if (!verifyIp(info.instance)) {
-        console.log("IP is not valid!");
-        return main();
-    }
-
+    // Get data from WLED instance
     await updateInfo().catch(err => {
         console.log(`Could not fetch, make sure the IP is valid and try again!\n`, err);
         return main();
     });
-    
-    setInterval(() => updateInfo().catch(() => { }), 10000);
 
+    // Add IP to file for easy access later
+    if (lastInstance != info.instance) {
+        try {
+            writeFileSync("./lastinstance", info.instance);
+        } catch (err) { }
+    }
+    
+    // Update info every 5 seconds
+    setInterval(() => updateInfo().catch(() => { }), 5 * 1000);
+
+    // Log info
     console.log("       [INFO]");
     console.log(`Status:        ${info.state.on ? "ON" : "OFF"}`);
     console.log(`Preset:        ${(info.state.ps < 0) ? "None" : info.state.ps}`);
@@ -37,6 +56,7 @@ const info = { };
     console.log(`Name:          ${info.info.name}`);
     console.log(`LED count:     ${info.info.leds.count}`);
     if (info.advanced) {
+    // Log advanced info
     console.log("   [ADVANCED INFO]");
     console.log(`WLED Version:  ${info.info.ver}`);
     console.log(`Uptime:        ${Math.floor(info.info.uptime / 86400)} days`);
@@ -46,6 +66,7 @@ const info = { };
     }
     
     (async function menu() {
+        // Prompt user for command
         const { menuPrompt } = await prompts({
             name: "menuPrompt",
             type: "select",
@@ -53,13 +74,15 @@ const info = { };
             choices: [
                 { title: `Turn ${info.state.on ? "off" : "on"}`, value: 1 },
                 { title: "Change brightness", value: 2 },
-                { title: "Set preset", value: 3 }
+                { title: "Set preset", value: 3 },
+                { title: "View info", value: 4 }
             ]
         });
-        if (!menuPrompt) return main();
+        if (!menuPrompt) return main(); // Return to start if no answer
 
         switch (menuPrompt) {
             case 1:
+                // Turn instance on/off
                 const state = info.state.on;
                 await req("/state", { on: state ? false : true }).then(() => {
                     info.state.on = state ? false : true;
@@ -68,6 +91,7 @@ const info = { };
                 menu();
                 break;
             case 2:
+                // Change instance brightness
                 const { brightness } = await prompts({
                     name: "brightness",
                     type: "number",
@@ -81,12 +105,14 @@ const info = { };
                     return menu();
                 } else if (brightnessNum < 0) brightnessNum = 0; else if (brightnessNum > 100) brightnessNum = 100;
                 await req("/state", { bri: Math.round(brightnessNum * 2.55) }).then(() => {
+                    info.state.on = true;
                     info.state.bri = Math.round(brightnessNum * 2.55);
                     console.log(`Brightness is now set to ${brightnessNum}% (${info.state.bri})!`);
                 }).catch(() => console.log(`Failed to set brightness to ${brightnessNum}%!`));
                 menu();
                 break;
             case 3:
+                // Change instance preset
                 const { preset } = await prompts({
                     name: "preset",
                     type: "number",
@@ -105,6 +131,26 @@ const info = { };
                 }).catch(() => console.log(`Failed to set preset ID to ${presetNum}!`));
                 menu();
                 break;
+            case 4:
+                // Log info
+                console.log("       [INFO]");
+                console.log(`Status:        ${info.state.on ? "ON" : "OFF"}`);
+                console.log(`Preset:        ${(info.state.ps < 0) ? "None" : info.state.ps}`);
+                console.log(`Playlist:      ${(info.state.pl < 0) ? "None" : info.state.pl}`);
+                console.log(`Brightness:    ${Math.round(info.state.bri / 2.55)}% (${info.state.bri})`);
+                console.log(`Name:          ${info.info.name}`);
+                console.log(`LED count:     ${info.info.leds.count}`);
+                if (info.advanced) {
+                // Log advanced info
+                console.log("   [ADVANCED INFO]");
+                console.log(`WLED Version:  ${info.info.ver}`);
+                console.log(`Uptime:        ${Math.floor(info.info.uptime / 86400)} days`);
+                console.log(`Architecture:  ${info.info.arch.toUpperCase()}`);
+                console.log(`Free heap:     ${info.info.freeheap / 1000} KB`);
+                console.log(`MAC:           ${info.info.mac.toUpperCase()}`);
+                }
+                menu();
+                break;
             default:
                 console.log("Option not implemented yet!");
                 menu();
@@ -113,6 +159,13 @@ const info = { };
     })();
 })();
 
+// Functions
+
+/**
+ * Checks if string is valid IP
+ * @param {string} ip IP to check
+ * @returns {Boolean}
+ */
 function verifyIp(ip) {
     const split = ip.split(".");
     let valid = true;
@@ -123,6 +176,11 @@ function verifyIp(ip) {
     if (!valid) return false; else return split;
 }
 
+/**
+ * Sends requests to WLED JSON API
+ * @param {string} path WLED JSON path
+ * @param {Object} body Additional body
+ */
 function req(path = "/", body) {
     return new Promise((resolve, reject) => {
         const i = http.request({
@@ -142,6 +200,9 @@ function req(path = "/", body) {
     });
 }
 
+/**
+ * Update WLED info
+ */
 function updateInfo() {
     return new Promise((resolve, reject) => req().then(i => { info.json = i; info.info = info.json.info; info.state = info.json.state; resolve(i); }).catch(err => reject(err)))
 }
